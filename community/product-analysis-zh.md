@@ -254,3 +254,109 @@
 - `languageDirective`：全流程语言一致性控制信号。
 - `generatingOutlines`：课堂中“待生成骨架”占位集合。
 
+
+---
+
+## 6. 前端视角：动态课堂内容 / Scene Runtime 是怎么展示出来的？
+
+这一层可以理解为：**生成引擎负责“产出 scene + actions”，Scene Runtime 负责“按时间和状态把 scene 演出来”**。
+
+### 6.1 运行时主入口（Classroom 页面）
+
+- 课堂页入口是 `app/classroom/[id]/page.tsx`。
+- 页面先从 IndexedDB / 服务端恢复 `stage + scenes`，再判断是否有未完成 outlines：
+  - 有未完成：调用 `useSceneGenerator.generateRemaining(...)` 边学边生成；
+  - 已完成：至少恢复/续跑媒体任务（图视频）。
+- 然后渲染 `<Stage />`，真正的 Scene Runtime 就在这个组件内。
+
+**你可以把这层理解为：**
+- `ClassroomPage` = 数据恢复 + 续跑调度器
+- `Stage` = 课堂播放器内核（渲染 + 播放 + 互动）
+
+### 6.2 Runtime 状态中枢：Zustand Store + Stage API
+
+Scene Runtime 并不是直接操作 DOM，而是靠“状态驱动渲染”：
+
+1. `useStageStore` 存放核心课堂状态：`stage / scenes / currentSceneId / generatingOutlines / failedOutlines`。
+2. `Stage API`（`lib/api/stage-api*.ts`）提供一组“场景操作语义”：
+   - `scene`（增删改查场景）
+   - `navigation`（next/prev/goTo）
+   - `element`（slide 元素增删改）
+   - `canvas`（highlight/spotlight/zoom/laser 等视觉效果）
+3. 运行时动作执行后，只改 store；React 组件订阅 store 自动重渲。
+
+这使得 Scene Runtime 具备“可回放、可中断、可恢复”的一致行为。
+
+### 6.3 Scene 渲染分发：按类型挂不同 Renderer
+
+`components/stage/scene-renderer.tsx` 是类型分发器：
+
+- `slide` -> `SlideEditor`（作为播放态渲染器使用）
+- `quiz` -> `QuizView`
+- `interactive` -> `InteractiveRenderer`
+- `pbl` -> `PBLRenderer`
+
+也就是说“动态课堂”不是一个单一画布，而是**多场景类型统一挂载协议**。
+
+### 6.4 Slide Runtime：不是静态图，而是可被动作驱动的画布
+
+在 slide 场景下，运行时会把当前 scene 的 elements/background/theme 喂给 `slide-renderer`。
+随后动作系统会动态施加：
+
+- 元素显隐/强调
+- spotlight / laser / zoom
+- 白板层叠加
+- 语音同步高亮
+
+因此用户看到的是“随讲解推进而变化”的画面，而不是一次性渲染完毕的静态 PPT。
+
+### 6.5 时间轴与动作执行：PlaybackEngine + ActionEngine
+
+`Stage` 组件内部关键对象：
+
+- `PlaybackEngine`：控制播放状态机（idle / playing / discussion 等）、节奏和触发事件。
+- `ActionEngine`：解释执行 scene.actions（speech / highlight / discuss / wait ...），把动作翻译成对 store/API 的状态变更。
+- `audioPlayer`：处理讲解音频播放。
+
+典型过程：
+1. 进入场景，初始化该场景动作序列。
+2. `ActionEngine` 按序推进动作。
+3. 每步动作改变 store 或播放音频。
+4. React UI 基于 store 变化刷新（画面、头像状态、气泡、特效）。
+
+### 6.6 讲授层 + 讨论层并行：Roundtable / Chat / TTS
+
+Runtime 不只有“老师播片”，还支持实时讨论：
+
+- `Roundtable` 显示多智能体发言状态、音频指示器。
+- `ChatArea` 管理会话流，支持继续/暂停/终止讨论。
+- `useDiscussionTTS` 在讨论模式下为不同 agent 生成或播放语音。
+- `Stage` 里维护 `lectureSpeech`（讲授）与 `liveSpeech`（讨论）两套文本流状态。
+
+这让课堂可在“脚本讲授”与“实时互动”之间切换。
+
+### 6.7 边生成边展示（Incremental Runtime）
+
+动态感的另一个来源是**数据增量到达**：
+
+1. 首场景先进入课堂并可立即播放。
+2. `useSceneGenerator` 在后台继续生成后续 scene。
+3. 每生成一个 scene 就 `addScene(scene)`，侧边栏与导航立刻可见。
+4. 如果失败，outline 被标记为 failed，可单独重试，不阻塞已可播放部分。
+
+所以用户体验上是“课程在成长”，不是“加载完成后一次性出现”。
+
+### 6.8 媒体资源异步水合（Hydration）
+
+图像/视频生成由 `media-orchestrator` 在旁路执行：
+
+- 任务状态放在 `useMediaGenerationStore`
+- 结果 blob 放 IndexedDB
+- 完成后写 object URL 回任务状态
+
+Scene Renderer 读取到可用 URL 后自然替换占位，形成“素材后到、画面自动变清晰/可播”的效果。
+
+### 6.9 Scene Runtime 的核心抽象（一句话）
+
+**Scene Runtime = Store（真相源） + Action Timeline（驱动） + Typed Renderers（呈现） + Async Hydration（后到资源补全）**。
+
